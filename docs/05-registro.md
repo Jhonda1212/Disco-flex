@@ -121,11 +121,12 @@ export function IniciarSesion() {
   useEffect(() => {
     const supabase = createClient()
 
-    // Comprueba si ya hay sesión activa
+    // Comprueba si ya hay sesión activa al arrancar
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (!session) { limpiarSesion(); return }
 
-      const { data: perfil } = await supabase
+      const cliente = createClient()
+      const { data: perfil } = await cliente
         .from('perfiles')
         .select('rol')
         .eq('id', session.user.id)
@@ -134,12 +135,13 @@ export function IniciarSesion() {
       setSesion(session.user, perfil?.rol ?? 'cliente')
     })
 
-    // Escucha cambios de sesión (login/logout en otra pestaña)
+    // Escucha cambios de sesión (login, logout, otra pestaña)
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (evento, session) => {
+      async (_evento, session) => {
         if (!session) { limpiarSesion(); return }
 
-        const { data: perfil } = await supabase
+        const cliente = createClient()
+        const { data: perfil } = await cliente
           .from('perfiles')
           .select('rol')
           .eq('id', session.user.id)
@@ -152,7 +154,7 @@ export function IniciarSesion() {
     return () => subscription.unsubscribe()
   }, [])
 
-  return null  // componente sin UI
+  return null
 }
 ```
 
@@ -370,9 +372,11 @@ export default function PaginaRegister() {
 ```
 1. Usuario introduce email y contraseña
 2. supabase.auth.signInWithPassword()
-3. onAuthStateChange (del layout) actualiza el store con usuario + rol
-4. Redirige según rol
+3. Redirige a '/'  →  IniciarSesion detecta la nueva sesión vía onAuthStateChange y actualiza el store
 ```
+
+> **¿Por qué no redirigir según rol aquí?**  
+> Hacer otra query a `perfiles` dentro del mismo handler que acaba de llamar a `signInWithPassword` puede causar un deadlock interno del cliente de Supabase (ver nota en sección 2). La redirección por rol se puede implementar más adelante en la guardia de Shell, que ya tiene el rol disponible en el store.
 
 ```jsx
 // src/app/login/page.jsx
@@ -383,13 +387,6 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import FlexLogo from '@/components/FlexLogo'
 import { createClient } from '@/lib/supabase/client'
-
-const RUTA_POR_ROL = {
-  cliente: '/',
-  staff:   '/staff',
-  portero: '/porteros',
-  admin:   '/admin',
-}
 
 export default function PaginaLogin() {
   const router = useRouter()
@@ -405,23 +402,16 @@ export default function PaginaLogin() {
 
     const supabase = createClient()
 
-    const { data, error: authError } = await supabase.auth.signInWithPassword({ email, password })
+    const { error: authError } = await supabase.auth.signInWithPassword({ email, password })
+
+    setCargando(false)
 
     if (authError) {
-      setCargando(false)
       setError('Email o contraseña incorrectos.')
       return
     }
 
-    // Obtener rol para redirigir a la ruta correcta
-    const { data: perfil } = await supabase
-      .from('perfiles')
-      .select('rol')
-      .eq('id', data.user.id)
-      .single()
-
-    const rol = perfil?.rol ?? 'cliente'
-    router.push(RUTA_POR_ROL[rol] ?? '/')
+    router.push('/')
   }
 
   return (
@@ -552,45 +542,24 @@ async function handleLogout() {
 
 ## 6. Guardia de autenticación
 
-Cualquier ruta que no sea `/login` ni `/register` requiere sesión activa. La guardia vive en `Shell.jsx`, que envuelve toda la app.
+> **Estado actual:** Shell no tiene guardia — cualquier usuario puede acceder a cualquier ruta. La protección de rutas se implementa en el siguiente paso.
+
+Por ahora Shell solo distingue entre rutas de auth (login/register, sin nav) y el resto (con nav completo):
 
 ```jsx
-// src/components/Shell.jsx  (dentro de export default function Shell)
-const { usuario, cargando } = useSesionStore()
+// src/components/Shell.jsx
+export default function Shell({ children }) {
+  const pathname = usePathname()
 
-useEffect(() => {
-  if (!cargando && !usuario && !AUTH_ROUTES.includes(pathname)) {
-    router.replace('/login')
-  }
-}, [cargando, usuario, pathname])
+  if (AUTH_ROUTES.includes(pathname)) return <>{children}</>
 
-if (AUTH_ROUTES.includes(pathname)) return <>{children}</>
-
-// Mientras resuelve la sesión o no hay usuario: no renderizar nada
-if (cargando || !usuario) return null
+  return (
+    // layout completo con sidebar y bottom nav
+  )
+}
 ```
 
-**¿Por qué `return null` y no un spinner?**
-
-Si renderizas el contenido protegido durante `cargando` y luego redirige, el usuario ve un flash de la pantalla privada. Con `null` no aparece nada hasta que se confirma la sesión.
-
-**Flujo completo:**
-
-```text
-App monta → cargando: true → Shell devuelve null (pantalla en blanco)
-                ↓
-         IniciarSesion consulta Supabase
-                ↓
-      ┌─────────────────────────┐
-      │ Hay sesión              │  Sin sesión
-      ↓                         ↓
-  setSesion()             limpiarSesion()
-  cargando: false         cargando: false
-  Shell renderiza         Shell detecta !usuario
-  la app normal           → router.replace('/login')
-```
-
-> `AUTH_ROUTES = ['/login', '/register']` — estas dos rutas son las únicas que se renderizan sin comprobar la sesión.
+La guardia completa (redirigir a `/login` si no hay sesión, redirigir a `/` si ya está logueado) se añade en el siguiente paso usando `useSesionStore`.
 
 ---
 
