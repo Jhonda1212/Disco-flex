@@ -7,477 +7,69 @@
 
 ## ¿Por qué Supabase Realtime?
 
-Sin Realtime, el camarero tendría que recargar la página para ver pedidos nuevos. Con Realtime, Supabase abre una conexión WebSocket y **empuja los cambios** de la DB directamente al navegador.
+Sin Realtime, el staff tendría que recargar la página para ver pedidos nuevos. Con Realtime, Supabase abre una conexión WebSocket y empuja los cambios de la base de datos directamente al navegador en cuanto ocurren.
 
 ```
 Sin Realtime:
-  Camarero ──▶ Recarga página ──▶ SELECT pedidos ──▶ DB
+  Staff ──▶ Recarga página ──▶ SELECT pedidos ──▶ DB
   (manual, lento, propenso a errores)
 
 Con Realtime:
-  DB cambia ──▶ Supabase Realtime ──▶ WebSocket ──▶ Camarero
+  DB cambia ──▶ Supabase Realtime ──▶ WebSocket ──▶ Staff
   (automático, inmediato, sin recargar)
 ```
 
-Supabase Realtime escucha cambios a nivel de tabla usando el mecanismo de **replicación lógica** de PostgreSQL. Solo necesitamos habilitarlo en las tablas que nos interesan.
+Supabase Realtime escucha cambios a nivel de tabla usando la **replicación lógica** de PostgreSQL. Solo hay que habilitarlo en las tablas que nos interesan.
 
 ---
 
-## 1. Habilitar Realtime en la tabla `pedidos`
+## 1. Habilitar Realtime en Supabase
 
-```sql
--- En el SQL Editor de Supabase:
--- Añade la tabla 'pedidos' a la publicación de replicación de Realtime
-alter publication supabase_realtime add table public.pedidos;
-alter publication supabase_realtime add table public.pedido_items;
-```
+Antes de escribir código, la tabla tiene que estar incluida en la publicación de replicación. Se hace desde el Dashboard de Supabase:
 
-> También puedes hacerlo desde el Dashboard: **Database → Replication → supabase_realtime** → activa los toggles de `pedidos` y `pedido_items`.
+1. Ve a **Database → Replication → supabase_realtime**
+2. Activa el toggle de la tabla `pedidos`
+
+Sin este paso, el canal se suscribe pero nunca recibe eventos.
 
 ---
 
-## 2. Store Zustand para el panel del camarero
+## 2. Carga inicial de datos
 
-```js
-// store/panelStore.js
-import { create } from 'zustand'
+Cuando el componente del panel monta, se hace una consulta normal a Supabase para obtener los pedidos actuales. Esta consulta trae los pedidos con todas sus relaciones (mesa, items, productos).
 
-/**
- * Store para el panel del camarero.
- * Gestiona la lista de pedidos activos y la suscripción Realtime.
- * No persistimos en localStorage: el camarero siempre ve el estado en vivo.
- */
-export const usePanelStore = create((set, get) => ({
-  // ─── Estado ─────────────────────────────────────────────────────
-  pedidos:     [],           // array de pedidos activos con sus items
-  cargando:    true,
-  error:       null,
-  canal:       null,         // referencia al canal Realtime (para desuscribirse)
-  filtroEstado: 'pendiente', // qué estado mostrar: 'pendiente'|'en_barra'|'listo'
-
-  // ─── Acciones ───────────────────────────────────────────────────
-
-  setFiltroEstado(estado) {
-    set({ filtroEstado: estado })
-  },
-
-  /**
-   * Carga los pedidos iniciales desde Supabase.
-   * Se llama una vez al montar el panel.
-   */
-  async cargarPedidos(supabase, piso) {
-    set({ cargando: true, error: null })
-
-    const { data, error } = await supabase
-      .from('pedidos')
-      .select(`
-        id,
-        estado,
-        total,
-        creado_en,
-        mesas ( numero, piso ),
-        pedido_items (
-          cantidad,
-          precio_unit,
-          productos ( nombre )
-        )
-      `)
-      .in('estado', ['pendiente', 'en_barra', 'listo'])
-      .eq('mesas.piso', piso)       // solo el piso del camarero
-      .order('creado_en', { ascending: true })
-
-    if (error) {
-      set({ error: error.message, cargando: false })
-      return
-    }
-
-    set({ pedidos: data ?? [], cargando: false })
-  },
-
-  /**
-   * Suscribe el panel a cambios en 'pedidos' via Realtime.
-   * Devuelve una función de cleanup para desuscribirse.
-   */
-  suscribir(supabase, piso) {
-    const canal = supabase
-      .channel(`panel-camarero-piso-${piso}`)
-      // Escucha INSERT: pedido nuevo
-      .on(
-        'postgres_changes',
-        {
-          event:  'INSERT',
-          schema: 'public',
-          table:  'pedidos',
-        },
-        async (payload) => {
-          const nuevoPedido = payload.new
-
-          // Enriquecemos el pedido con sus relaciones (el payload no las incluye)
-          const { data } = await supabase
-            .from('pedidos')
-            .select(`
-              id, estado, total, creado_en,
-              mesas ( numero, piso ),
-              pedido_items ( cantidad, precio_unit, productos ( nombre ) )
-            `)
-            .eq('id', nuevoPedido.id)
-            .single()
-
-          if (!data || data.mesas?.piso !== piso) return
-
-          set((estado) => ({ pedidos: [...estado.pedidos, data] }))
-        }
-      )
-      // Escucha UPDATE: cambio de estado del pedido
-      .on(
-        'postgres_changes',
-        {
-          event:  'UPDATE',
-          schema: 'public',
-          table:  'pedidos',
-        },
-        (payload) => {
-          const actualizado = payload.new
-
-          set((estado) => ({
-            pedidos: estado.pedidos
-              // Si el pedido pasa a 'entregado' o 'cancelado', lo quitamos del panel
-              .filter((p) => {
-                if (p.id !== actualizado.id) return true
-                return !['entregado', 'cancelado'].includes(actualizado.estado)
-              })
-              // Si sigue activo, actualizamos su estado
-              .map((p) =>
-                p.id === actualizado.id ? { ...p, estado: actualizado.estado } : p
-              ),
-          }))
-        }
-      )
-      .subscribe()
-
-    set({ canal })
-
-    // Devuelve la función de cleanup
-    return () => {
-      supabase.removeChannel(canal)
-      set({ canal: null })
-    }
-  },
-
-  /**
-   * Actualiza el estado de un pedido (staff/admin).
-   */
-  async cambiarEstado(supabase, pedidoId, nuevoEstado) {
-    const { error } = await supabase
-      .from('pedidos')
-      .update({ estado: nuevoEstado, actualizado: new Date().toISOString() })
-      .eq('id', pedidoId)
-
-    if (error) console.error('Error actualizando estado:', error)
-    // El UPDATE de Supabase Realtime actualizará la lista automáticamente
-  },
-}))
-```
+El resultado se guarda en el estado del componente. A partir de aquí, el estado se mantiene actualizado solo mediante los eventos Realtime — ya no hace falta volver a consultar la base de datos.
 
 ---
 
-## 3. Componente Panel del Camarero
+## 3. Abrir el canal Realtime
 
-```jsx
-// components/PanelCamarero.jsx
-'use client'
+Una vez cargados los pedidos iniciales, se abre un canal Supabase. Un canal es una sala de escucha con nombre único que mantiene una conexión WebSocket activa con el servidor.
 
-import { useEffect } from 'react'
-import { createClient } from '@supabase/supabase-js'
-import { usePanelStore } from '@/store/panelStore'
+Sobre ese canal se registran tres listeners, uno por tipo de evento:
 
-const ESTADOS_SIGUIENTES = {
-  pendiente: 'en_barra',
-  en_barra:  'listo',
-  listo:     'entregado',
-}
+### INSERT — llega un pedido nuevo
 
-const ETIQUETAS_ESTADO = {
-  pendiente: '🕐 Pendiente',
-  en_barra:  '🍺 En barra',
-  listo:     '✅ Listo',
-  entregado: '📦 Entregado',
-}
+Cuando un cliente confirma un pedido, Supabase emite un evento `INSERT`. El payload solo contiene las columnas directas de la fila, sin relaciones (sin mesa, sin items). Por eso es necesario hacer una segunda consulta para obtener el pedido completo. Una vez obtenido, se añade al array de pedidos en el estado.
 
-export default function PanelCamarero({ piso }) {
-  const {
-    pedidos,
-    cargando,
-    error,
-    filtroEstado,
-    setFiltroEstado,
-    cargarPedidos,
-    suscribir,
-    cambiarEstado,
-  } = usePanelStore()
+### UPDATE — cambia el estado de un pedido
 
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-  )
+Cuando el staff avanza el estado de un pedido (o lo hace otro compañero desde otro dispositivo), llega un evento `UPDATE`. En este caso el payload sí contiene el campo actualizado, así que no hace falta consultar nada: simplemente se actualiza el campo `estado` del pedido correspondiente en el array.
 
-  useEffect(() => {
-    // Carga inicial
-    cargarPedidos(supabase, piso)
+### DELETE — se elimina un pedido
 
-    // Suscripción Realtime
-    const desuscribir = suscribir(supabase, piso)
-
-    // Cleanup: se ejecuta cuando el componente se desmonta
-    return desuscribir
-  }, [piso])  // si cambia el piso, recarga y resuscribe
-
-  const pedidosFiltrados = pedidos.filter((p) => p.estado === filtroEstado)
-
-  if (cargando) return <p>Cargando pedidos...</p>
-  if (error)    return <p>Error: {error}</p>
-
-  return (
-    <div className="panel-camarero">
-      <h1>Panel Camarero — Piso {piso}</h1>
-
-      {/* Filtros por estado */}
-      <div className="filtros">
-        {['pendiente', 'en_barra', 'listo'].map((estado) => (
-          <button
-            key={estado}
-            onClick={() => setFiltroEstado(estado)}
-            className={filtroEstado === estado ? 'activo' : ''}
-          >
-            {ETIQUETAS_ESTADO[estado]}
-            {/* Badge con el número de pedidos en ese estado */}
-            <span className="badge">
-              {pedidos.filter((p) => p.estado === estado).length}
-            </span>
-          </button>
-        ))}
-      </div>
-
-      {/* Lista de pedidos */}
-      {pedidosFiltrados.length === 0 ? (
-        <p>No hay pedidos {filtroEstado}.</p>
-      ) : (
-        <div className="lista-pedidos">
-          {pedidosFiltrados.map((pedido) => (
-            <TarjetaPedido
-              key={pedido.id}
-              pedido={pedido}
-              onCambiarEstado={(nuevoEstado) =>
-                cambiarEstado(supabase, pedido.id, nuevoEstado)
-              }
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function TarjetaPedido({ pedido, onCambiarEstado }) {
-  const estadoSiguiente = ESTADOS_SIGUIENTES[pedido.estado]
-  const tiempoEspera    = Math.floor(
-    (Date.now() - new Date(pedido.creado_en)) / 60000
-  )
-
-  return (
-    <div className={`tarjeta-pedido estado-${pedido.estado}`}>
-      <div className="cabecera">
-        <strong>Mesa {pedido.mesas?.numero}</strong>
-        <span className={`tiempo ${tiempoEspera > 10 ? 'urgente' : ''}`}>
-          {tiempoEspera} min
-        </span>
-      </div>
-
-      <ul className="items">
-        {pedido.pedido_items?.map((item, i) => (
-          <li key={i}>
-            {item.cantidad}× {item.productos?.nombre}
-          </li>
-        ))}
-      </ul>
-
-      <div className="pie">
-        <span>{pedido.total?.toFixed(2)} €</span>
-        {estadoSiguiente && (
-          <button onClick={() => onCambiarEstado(estadoSiguiente)}>
-            Marcar como {ETIQUETAS_ESTADO[estadoSiguiente]}
-          </button>
-        )}
-      </div>
-    </div>
-  )
-}
-```
+Si un pedido se cancela o elimina desde administración, llega un evento `DELETE`. Se filtra el pedido del array por su `id`.
 
 ---
 
-## 4. Ruta del panel (protegida por rol)
+## 4. Actualización optimista al avanzar estado
 
-```jsx
-// app/panel/page.jsx
-import { createServerClient } from '@supabase/ssr'
-import { cookies } from 'next/headers'
-import { redirect } from 'next/navigation'
-import PanelCamarero from '@/components/PanelCamarero'
+Cuando el staff pulsa el botón para avanzar un pedido, no se espera a que llegue el evento Realtime para actualizar la pantalla. Se actualiza el estado local inmediatamente (optimistic update) y en paralelo se llama al servidor para persistir el cambio. Si la llamada al servidor falla, se revierte el estado local al valor anterior.
 
-export default async function PaginaPanel() {
-  const cookieStore = cookies()
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-    { cookies: { getAll: () => cookieStore.getAll() } }
-  )
-
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) redirect('/login')
-
-  const { data: perfil } = await supabase
-    .from('perfiles')
-    .select('rol')
-    .eq('id', user.id)
-    .single()
-
-  if (!perfil || !['staff', 'admin'].includes(perfil.rol)) {
-    redirect('/')  // clientes no tienen acceso al panel
-  }
-
-  // El piso del camarero podría estar en su perfil.
-  // Por ahora asignamos piso 1 por defecto (ver Reto Flex).
-  return <PanelCamarero piso={1} />
-}
-```
+El evento `UPDATE` de Realtime llegará después y confirmará el cambio, o lo sincronizará en los dispositivos de otros miembros del staff.
 
 ---
 
-## 5. Despliegue en Vercel
+## 5. Cerrar el canal al desmontar
 
-### 5.1 Preparar el repositorio
-
-```bash
-# Asegúrate de tener un .gitignore correcto
-echo ".env.local" >> .gitignore
-echo ".env*.local" >> .gitignore
-
-git add .
-git commit -m "feat: proyecto Flex inicial"
-git push origin main
-```
-
-### 5.2 Conectar con Vercel
-
-1. Ve a [vercel.com](https://vercel.com) → **Add New Project**
-2. Importa tu repositorio de GitHub
-3. En el asistente de importación, despliega **Root Directory** y escribe `apps/web`
-4. Framework: **Next.js** (Vercel lo detecta automáticamente si el Root Directory es correcto)
-5. Click en **Deploy** (la primera vez fallará porque faltan las variables de entorno)
-
-> **Monorepo — problema frecuente:** Si el framework se detecta como *"Other"* en lugar de *Next.js*, el routing no funcionará y todas las rutas devolverán `404 NOT_FOUND` aunque el deployment esté en verde. La causa es que Vercel no reconoció el framework al crear el proyecto.
->
-> **Solución:** Añade un archivo `apps/web/vercel.json` con el siguiente contenido y haz push:
->
-> ```json
-> { "framework": "nextjs" }
-> ```
->
-> Esto fuerza a Vercel a tratar el proyecto como Next.js independientemente de lo que detecte automáticamente. El archivo ya está incluido en este repositorio.
-
-### 5.3 Variables de entorno en Vercel
-
-Ve a tu proyecto → **Settings → Environment Variables** y añade:
-
-| Variable                              | Valor                              | Entornos              |
-|---------------------------------------|------------------------------------|-----------------------|
-| `NEXT_PUBLIC_SUPABASE_URL`            | `https://xxxx.supabase.co`        | Production, Preview   |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY`       | `eyJ...`                           | Production, Preview   |
-| `SUPABASE_SERVICE_ROLE_KEY`           | `eyJ...`                           | Production, Preview   |
-| `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`  | `pk_live_...` / `pk_test_...`      | Production / Preview  |
-| `STRIPE_SECRET_KEY`                   | `sk_live_...` / `sk_test_...`      | Production / Preview  |
-| `STRIPE_WEBHOOK_SECRET`               | `whsec_...`                        | Production, Preview   |
-| `NEXT_PUBLIC_APP_URL`                 | `https://flex.vercel.app`          | Production            |
-| `NEXT_PUBLIC_APP_URL`                 | `https://flex-git-main-....vercel.app` | Preview          |
-
-> **Importante:** Las variables `NEXT_PUBLIC_*` son accesibles en el cliente (navegador). Las demás solo en el servidor. Nunca pongas `STRIPE_SECRET_KEY` ni `SUPABASE_SERVICE_ROLE_KEY` con el prefijo `NEXT_PUBLIC_`.
-
-### 5.4 Re-desplegar tras añadir variables
-
-```
-Vercel Dashboard → tu proyecto → Deployments → ... → Redeploy
-```
-
-O simplemente haz un nuevo `git push` con cualquier cambio mínimo.
-
-### 5.5 Actualizar las URLs del webhook de Stripe
-
-Con la app desplegada en `https://flex.vercel.app`, actualiza el endpoint en Stripe:
-
-```
-https://flex.vercel.app   ← ya no es localhost
-```
-
-Y en los secrets de Supabase:
-
-```bash
-supabase secrets set NEXT_PUBLIC_APP_URL=https://flex.vercel.app
-supabase functions deploy crear-checkout
-supabase functions deploy stripe-webhook
-supabase functions deploy verificar-entrada
-```
-
----
-
-## 6. Configurar Supabase Auth para la URL de producción
-
-En el Dashboard de Supabase → **Authentication → URL Configuration**:
-
-```
-Site URL:         https://flex.vercel.app
-Redirect URLs:    https://flex.vercel.app/**
-                  http://localhost:3000/**    ← para desarrollo local
-```
-
-Sin esto, el login con OAuth o magic links redirige a la URL incorrecta.
-
----
-
-## 7. Checklist de despliegue
-
-```
-□ Variables de entorno añadidas en Vercel
-□ Site URL y Redirect URLs actualizados en Supabase Auth
-□ Buckets de Storage creados y políticas aplicadas
-□ Edge Functions desplegadas con los secrets correctos
-□ Webhook de Stripe apuntando a la URL de producción
-□ Realtime habilitado en tablas 'pedidos' y 'pedido_items'
-□ PWA: manifest.json accesible en /manifest.json (status 200)
-□ HTTPS activo (Vercel lo gestiona automáticamente)
-```
-
----
-
-## Reto Flex 🎸
-
-1. Añade el campo `piso` al perfil del staff en la tabla `perfiles` (columna `piso_asignado smallint`). Modifica la página `/panel` para que el camarero vea automáticamente los pedidos del piso que tiene asignado en su perfil.
-
-2. Implementa una **notificación sonora** en el panel: cuando llegue un pedido nuevo via Realtime, reproduce un sonido de notificación usando la Web Audio API:
-   ```js
-   const ctx = new AudioContext()
-   const osc = ctx.createOscillator()
-   osc.connect(ctx.destination)
-   osc.start()
-   osc.stop(ctx.currentTime + 0.2)
-   ```
-
-3. Añade en Vercel un entorno de **Preview** diferente al de Production: usa las claves `pk_test_` de Stripe en Preview y `pk_live_` en Production. Configura los valores por entorno desde el Dashboard de Vercel.
-
-> **Pista:** Vercel permite definir valores distintos para la misma variable según el entorno (Production / Preview / Development) directamente desde la interfaz de variables de entorno.
-
----
-
-## Navegación
-
-[← 06 — PWA y Entradas QR](./06-pwa-y-entradas-qr.md)
+Cuando el staff navega fuera del panel, el componente se desmonta. En ese momento hay que cerrar el canal Realtime explícitamente. Sin este paso, la conexión WebSocket quedaría abierta en memoria indefinidamente, consumiendo recursos y recibiendo eventos que nadie escucha.
