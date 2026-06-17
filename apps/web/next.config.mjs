@@ -16,13 +16,13 @@ const nextConfig = {
       {
         protocol: 'http',
         hostname: 'localhost',
-        port: '54321',
+        port: '57321',
         pathname: '/storage/v1/object/public/**',
       },
       {
         protocol: 'http',
         hostname: '127.0.0.1',
-        port: '54321',
+        port: '57321',
         pathname: '/storage/v1/object/public/**',
       },
       {
@@ -32,6 +32,7 @@ const nextConfig = {
       {
         protocol: 'https',
         hostname: 'ktwnpnzopnucgfpmleuk.supabase.co',
+        pathname: '/storage/v1/object/public/**',
       },
     ],
   },
