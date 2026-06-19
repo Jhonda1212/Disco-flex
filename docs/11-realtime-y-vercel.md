@@ -27,7 +27,7 @@ Supabase Realtime escucha cambios a nivel de tabla usando la **replicación lóg
 
 Antes de escribir código, la tabla tiene que estar incluida en la publicación de replicación. Se hace desde el Dashboard de Supabase:
 
-1. Ve a **Database → Replication → supabase_realtime**
+1. Ve a **Editar tabla → Enable realtime**
 2. Activa el toggle de la tabla `pedidos`
 
 Sin este paso, el canal se suscribe pero nunca recibe eventos.
@@ -73,3 +73,7 @@ El evento `UPDATE` de Realtime llegará después y confirmará el cambio, o lo s
 ## 5. Cerrar el canal al desmontar
 
 Cuando el staff navega fuera del panel, el componente se desmonta. En ese momento hay que cerrar el canal Realtime explícitamente. Sin este paso, la conexión WebSocket quedaría abierta en memoria indefinidamente, consumiendo recursos y recibiendo eventos que nadie escucha.
+
+## 6. Reto
+
+Si un portero valida la reserva de un cliente, ¿cómo sabe otr portero que el ticket está validado? ¿Aquí también necesitamos realtime? Si es que sí, ¿cómo lo implementaríamos?

@@ -32,7 +32,8 @@ export default function StaffClient({ pedidosIniciales }) {
       // El payload solo trae las columnas directas de la fila (sin mesas, sin ítems),
       // así que hacemos una query adicional para obtener el pedido completo con relaciones.
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'pedidos' }, async (payload) => {
-        const { data } = await supabase
+        console.log('[realtime] INSERT recibido:', payload)
+        const { data, error } = await supabase
           .from('pedidos')
           .select(`
             id, estado, creado_en,
@@ -42,6 +43,7 @@ export default function StaffClient({ pedidosIniciales }) {
           `)
           .eq('id', payload.new.id)
           .single()
+        console.log('[realtime] query resultado:', { data, error })
         if (data) setPedidos(prev => [...prev, data])
       })
 

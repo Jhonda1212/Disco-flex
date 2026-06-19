@@ -226,3 +226,22 @@ create policy "usuario: actualizar su avatar"
     bucket_id = 'avatares'
     and (storage.foldername(name))[1] = auth.uid()::text
   );
+
+-- Permisos de tabla por rol
+GRANT SELECT ON public.productos     TO authenticated;
+GRANT SELECT ON public.mesas         TO authenticated;
+GRANT SELECT ON public.salas_vip     TO authenticated;
+GRANT SELECT ON public.perfiles      TO authenticated;
+GRANT UPDATE ON public.perfiles      TO authenticated;
+
+GRANT SELECT, INSERT ON public.pedidos      TO authenticated;
+GRANT UPDATE          ON public.pedidos      TO authenticated;
+GRANT SELECT, INSERT  ON public.pedido_items TO authenticated;
+
+GRANT SELECT, INSERT ON public.reservas TO authenticated;
+GRANT UPDATE         ON public.reservas TO authenticated;
+
+-- Sequences para INSERT con bigserial/serial
+GRANT USAGE, SELECT ON SEQUENCE public.pedidos_id_seq      TO authenticated;
+GRANT USAGE, SELECT ON SEQUENCE public.pedido_items_id_seq TO authenticated;
+GRANT USAGE, SELECT ON SEQUENCE public.reservas_id_seq     TO authenticated;
